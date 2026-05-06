@@ -1,5 +1,3 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #pragma once
 
 #include "CoreMinimal.h"
@@ -13,11 +11,10 @@ class USceneCaptureComponent2D;
 class APlayerController;
 class UInputMappingContext;
 class UInputAction;
+class ULeapComponent;
+class ATomatinaHUD;
 
-/**
- * カメラマン 1P のポーン。
- * PlayerCamera（メインモニター用）と SceneCapture_Zoom（RT_Zoom 出力）を持つ。
- */
+// 撮影操作とズーム用SceneCaptureを持つプレイヤーポーン。
 UCLASS()
 class TOMATO_API ATomatinaPlayerPawn : public ADefaultPawn
 {
@@ -30,19 +27,17 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 
-	// ──────────────────────────────────────────────
-	// コンポーネント
-	// ──────────────────────────────────────────────
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Camera")
 	UCameraComponent* PlayerCamera;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Camera")
 	USceneCaptureComponent2D* SceneCapture_Zoom;
 
-	// ──────────────────────────────────────────────
-	// 画面サイズ（BP で一元設定する 4 変数）
-	// GameMode / HUD は BeginPlay で Pawn から取得
-	// ──────────────────────────────────────────────
+	// 旧BPのLeapイベント参照を壊さないための互換用。タオル操作はTowelSystem側で読む。
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Deprecated")
+	ULeapComponent* Leap = nullptr;
+
+	// GameMode / HUD が BeginPlay で参照する画面サイズ。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Screen")
 	float MainWidth = 2560.f;
 
@@ -55,24 +50,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Screen")
 	float PhoneHeight = 1152.f;
 
-	// ──────────────────────────────────────────────
-	// テストモード（iPhone なしで PiP 動作確認）
-	// ──────────────────────────────────────────────
+	// iPhoneなしのPiP確認用。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
 	bool bTestMode = true;
 
-	// ──────────────────────────────────────────────
-	// 第二ウィンドウ方式 (スマホ側を独立 SWindow に出す)
-	//   true:  メインウィンドウ = 2560x1600 (スパンしない)
-	//          HUD が別 SWindow を (MainWidth, 0) に生成しスマホ側 UI を出す
-	//   false: 旧仕様の「1枚スパンウィンドウ」
-	// ──────────────────────────────────────────────
+	// 入力/ズーム/画面配置調査用。通常はOFF。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Debug")
+	bool bDebugPlayerLog = false;
+
+	// trueならスマホ側を独立SWindowへ出す。falseは旧スパンウィンドウ方式。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Screen")
 	bool bUseSeparatePhoneWindow = true;
 
-	// ──────────────────────────────────────────────
-	// ズーム状態
-	// ──────────────────────────────────────────────
 	UPROPERTY(BlueprintReadOnly, Category="Zoom")
 	bool bIsZooming = false;
 
@@ -97,49 +86,50 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom")
 	float MoveSpeed = 500.f;
 
-	/** ズーム中の視点移動感度（値が大きいほど少ないマウス移動で大きく回る） */
+	// ズーム中の視点移動感度。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom")
 	float ZoomLookSensitivity = 3.0f;
 
-	/** ズーム中の Pitch（上下）最大角度（±）。90 近くにすると真上／真下まで向ける */
+	// ズーム中のPitch最大角度。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom")
 	float ZoomPitchLimit = 89.f;
 
-	/** ズーム中の Yaw（左右）最大角度（±）。180 で一周可。0 以下で制限なし */
+	// 0以下ならYaw制限なし。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom")
 	float ZoomYawLimit = 0.f;
 
-	/** ズームカメラの位置オフセットスイープ時の球半径 (cm) */
+	// ズームカメラの衝突回避スイープ用。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom")
 	float ZoomOffsetSweepRadius = 15.f;
 
-	/** スイープヒット時に壁から離しておく余裕距離 (cm) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom")
 	float ZoomOffsetSafetyMargin = 25.f;
 
-	/** SceneCapture の近接クリップ (cm)。壁へ食い込みかけた時にその面を描画しない保険 */
+	// 壁へ食い込みかけた時に手前の面を描画しない保険。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom")
 	float ZoomNearClippingPlane = 20.f;
 
-	/** 虚空（空）をクリックしたときに仮想ヒット位置として使う距離 (cm)。
-	 *  これにより空にいる鳥等にもズームして撮影できる。 */
+	// スマホ側RenderTargetを開始直後だけ温める。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom|Capture", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float InitialPhoneCaptureSeconds = 0.35f;
+
+	// ズーム前後の短いキャプチャ猶予。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom|Capture", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float ZoomTransitionCaptureSeconds = 0.25f;
+
+	// 空クリック時の仮想ヒット距離。空の鳥などにもズームできるようにする。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom")
 	float SkyFallbackDistance = 3000.f;
 
 	UPROPERTY(BlueprintReadOnly, Category="Zoom")
 	FVector TargetOffset = FVector::ZeroVector;
 
-	/** ズーム開始時（右クリックでズーム確定した瞬間）の SE */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom|Audio")
 	FTomatinaSoundCue ZoomInSound;
 
-	/** ズーム解除時の SE */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Zoom|Audio")
 	FTomatinaSoundCue ZoomOutSound;
 
-	// ──────────────────────────────────────────────
-	// Enhanced Input
-	// ──────────────────────────────────────────────
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Input")
 	UInputMappingContext* DefaultMappingContext = nullptr;
 
@@ -171,4 +161,21 @@ private:
 
 	// Tick で消費されるマウス入力（Triggered で蓄積）
 	FVector2D CurrentLookInput = FVector2D::ZeroVector;
+
+	float PhoneCaptureBurstRemaining = 0.f;
+
+	void UpdateDualScreenLayoutRetry(float DeltaTime);
+	void UpdateZoomInterpolation(float RealDelta);
+	void CenterLegacySpanCursorWhenZoomReady();
+	void EnableZoomLookWhenReady();
+	void ApplyZoomLookInput(float RealDelta);
+	void UpdateZoomHUDCursor(ATomatinaHUD* HUD);
+	void ResetZoomViewWhenIdle();
+	void ClampMouseCursorToMainScreen();
+	void EndZoomInteraction();
+	void ClampZoomTargetOffsetAgainstWorld();
+	void ApplyZoomNearClipGuard();
+	void RequestPhoneCaptureBurst(float Duration);
+	void UpdatePhoneSceneCapture(float DeltaTime);
+	void CapturePhoneSceneNow();
 };

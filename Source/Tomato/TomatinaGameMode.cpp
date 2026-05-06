@@ -1,5 +1,3 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #include "TomatinaGameMode.h"
 
 #include "Components/AudioComponent.h"
@@ -21,11 +19,9 @@
 ATomatinaGameMode::ATomatinaGameMode()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	TowelSystemClass = ATomatinaTowelSystem::StaticClass();
 }
 
-// =============================================================================
-// BeginPlay — カウントダウンを開始
-// =============================================================================
 void ATomatinaGameMode::BeginPlay()
 {
 	UE_LOG(LogTemp, Warning, TEXT("ATomatinaGameMode::BeginPlay 開始"));
@@ -37,7 +33,6 @@ void ATomatinaGameMode::BeginPlay()
 		return;
 	}
 
-	// TargetSpawner 取得
 	TArray<AActor*> Found;
 	UGameplayStatics::GetAllActorsOfClass(
 		GetWorld(), ATomatinaTargetSpawner::StaticClass(), Found);
@@ -52,13 +47,12 @@ void ATomatinaGameMode::BeginPlay()
 			TEXT("ATomatinaGameMode: TargetSpawner がレベルに未配置"));
 	}
 
-	// ミッションシャッフル
+	EnsureTowelSystemExists();
+
 	if (bRandomOrder) { ShuffleMissions(); }
 
-	// 画面サイズを PlayerPawn から取得
 	CachePlayerPawnSizes();
 
-	// スタイリッシュ初期化
 	StylishGauge = 0.f;
 	StylishRank = EStylishRank::C;
 	StylishComboCount = 0;
@@ -87,7 +81,7 @@ void ATomatinaGameMode::BeginPlay()
 		GameTimeTotal, GameTimeOverride);
 
 	// BGM 再生前に、既に同じサウンドを再生している AudioComponent を全部止める。
-	// (BP の Event BeginPlay で Play Sound 2D 重複、AmbientSound 配置、PIE 再生残骸への保険)
+	// BPのBeginPlay重複、AmbientSound配置、PIE再生残りへの保険。
 	if (UWorld* W = GetWorld())
 	{
 		for (TObjectIterator<UAudioComponent> It; It; ++It)
@@ -101,20 +95,17 @@ void ATomatinaGameMode::BeginPlay()
 		}
 	}
 
-	// BGM 再生（StopAllSoundsExceptBGM で判別するために AudioComponent を保持）
 	if (BGM)
 	{
 		BGMAudioComp = UGameplayStatics::SpawnSound2D(this, BGM);
 	}
 
-	// 観客ざわめきループ（最終リザルト溜めで StopAllSoundsExceptBGM により停止される）
 	if (CrowdAmbient)
 	{
 		CrowdAudioComp = UGameplayStatics::SpawnSound2D(
 			this, CrowdAmbient, CrowdAmbientVolume);
 	}
 
-	// ── ロード開始：世界停止 + HUD に「ロード中...」を表示 ──
 	// 必要アクター（TargetSpawner / DirtManager 等）が揃い、かつ LoadingHoldSeconds 経過後に
 	// カウントダウンへ遷移する（IsLoadingComplete / Tick 参照）
 	UGameplayStatics::SetGlobalTimeDilation(GetWorld(), 0.0f);
@@ -134,9 +125,6 @@ void ATomatinaGameMode::BeginPlay()
 		Missions.Num(), LoadingHoldSeconds);
 }
 
-// =============================================================================
-// IsLoadingComplete — Spawner 等の準備完了 + 保持秒数経過
-// =============================================================================
 bool ATomatinaGameMode::IsLoadingComplete() const
 {
 	if (LoadingElapsed < LoadingHoldSeconds) { return false; }
@@ -149,9 +137,6 @@ bool ATomatinaGameMode::IsLoadingComplete() const
 	return true;
 }
 
-// =============================================================================
-// BeginCountdownAfterLoading — 「ロード中...」を消してカウントダウン 3 から開始
-// =============================================================================
 void ATomatinaGameMode::BeginCountdownAfterLoading()
 {
 	bIsLoading          = false;
@@ -171,179 +156,238 @@ void ATomatinaGameMode::BeginCountdownAfterLoading()
 	UE_LOG(LogTemp, Warning, TEXT("ATomatinaGameMode: カウントダウン開始"));
 }
 
-// =============================================================================
-// Tick — カウントダウン・リザルト・制限時間を全て FApp 実時間で管理
-// =============================================================================
 void ATomatinaGameMode::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
 	const float RealDelta = FApp::GetDeltaTime();
 
-	// ── ロード中 ───────────────────────────────────────
-	// 「ロード中...」表示。LoadingHoldSeconds 経過 + 必要アクター揃いで
-	// カウントダウンへ遷移する。
-	if (bIsLoading)
-	{
-		LoadingElapsed += RealDelta;
+	if (TickLoading(RealDelta)) { return; }
+	if (TickCountdown(RealDelta)) { return; }
+	if (TickGameTime(DeltaSeconds)) { return; }
+	if (TickPhotoResult(RealDelta)) { return; }
+	if (TickMissionResult(RealDelta)) { return; }
+	if (TickFinalResultBuildup(RealDelta)) { return; }
 
-		if (IsLoadingComplete())
-		{
-			BeginCountdownAfterLoading();
-		}
-		return;
+	UpdateStylishGauge(RealDelta);
+	TickMissionTimer(DeltaSeconds);
+}
+
+bool ATomatinaGameMode::TickLoading(float RealDelta)
+{
+	if (!bIsLoading)
+	{
+		return false;
 	}
 
-	// ── カウントダウン中 ───────────────────────────────
-	if (bInCountdown)
+	LoadingElapsed += RealDelta;
+	if (IsLoadingComplete())
 	{
-		CountdownRemaining -= RealDelta;
-
-		const int32 NewSecond = FMath::CeilToInt(CountdownRemaining);
-		if (NewSecond != LastCountdownSecond && NewSecond > 0)
-		{
-			LastCountdownSecond = NewSecond;
-			if (ATomatinaHUD* HUD = GetTomatinaHUD())
-			{
-				HUD->ShowCountdown(NewSecond);
-			}
-			// カウントダウン各秒の SE
-			UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, CountdownTickSound);
-		}
-
-		if (CountdownRemaining <= 0.f)
-		{
-			bInCountdown = false;
-			UGameplayStatics::SetGlobalTimeDilation(GetWorld(), 1.0f);
-
-			if (ATomatinaHUD* HUD = GetTomatinaHUD())
-			{
-				HUD->HideCountdown();
-				// ゲーム全体タイマーの初期表示
-				HUD->UpdateGameTimer(GameTimeRemaining, GameTimeTotal);
-			}
-			// スタートの合図 SE
-			UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, CountdownGoSound);
-			StartMission(0);
-		}
-		return;
+		BeginCountdownAfterLoading();
 	}
 
-	// ── ゲーム全体の制限時間カウントダウン ─────────────
-	// カウントダウン中・リザルト表示中以外（TimeDilation=1 の時）にだけ減る
-	if (!bIsShowingResult && !bIsShowingMissionResult && !bIsBuildingUpFinalResult
-		&& GameTimeRemaining > 0.f)
+	return true;
+}
+
+bool ATomatinaGameMode::TickCountdown(float RealDelta)
+{
+	if (!bInCountdown)
 	{
-		GameTimeRemaining -= DeltaSeconds; // TimeDilation 準拠なのでポーズ中は進まない
-		if (GameTimeRemaining < 0.f) { GameTimeRemaining = 0.f; }
+		return false;
+	}
+
+	CountdownRemaining -= RealDelta;
+
+	const int32 NewSecond = FMath::CeilToInt(CountdownRemaining);
+	if (NewSecond != LastCountdownSecond && NewSecond > 0)
+	{
+		LastCountdownSecond = NewSecond;
+		if (ATomatinaHUD* HUD = GetTomatinaHUD())
+		{
+			HUD->ShowCountdown(NewSecond);
+		}
+		UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, CountdownTickSound);
+	}
+
+	if (CountdownRemaining <= 0.f)
+	{
+		bInCountdown = false;
+		UGameplayStatics::SetGlobalTimeDilation(GetWorld(), 1.0f);
 
 		if (ATomatinaHUD* HUD = GetTomatinaHUD())
 		{
+			HUD->HideCountdown();
 			HUD->UpdateGameTimer(GameTimeRemaining, GameTimeTotal);
 		}
+		ForceTowelToCenterAfterCountdown();
+		UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, CountdownGoSound);
+		StartMission(0);
+	}
 
-		if (GameTimeRemaining <= 0.f)
+	return true;
+}
+
+void ATomatinaGameMode::ForceTowelToCenterAfterCountdown()
+{
+	const FVector2D CenterPosition(0.5f, 0.5f);
+	bool bForcedAnyTowelSystem = false;
+
+	if (GetWorld())
+	{
+		TArray<AActor*> TowelActors;
+		UGameplayStatics::GetAllActorsOfClass(GetWorld(), ATomatinaTowelSystem::StaticClass(), TowelActors);
+		for (AActor* Actor : TowelActors)
 		{
-			UE_LOG(LogTemp, Warning,
-				TEXT("ATomatinaGameMode: ゲーム全体の制限時間に到達 → 最終リザルトへ"));
-			BeginFinalResultBuildup();
-			return;
+			if (ATomatinaTowelSystem* TowelSystem = Cast<ATomatinaTowelSystem>(Actor))
+			{
+				TowelSystem->ForceTowelToCenterAfterCountdown();
+				CachedTowelSystem = TowelSystem;
+				bForcedAnyTowelSystem = true;
+			}
 		}
 	}
 
-	// ── 撮影リザルト表示中（TimeDilation=0 なので FApp で計測） ──
-	if (bIsShowingResult)
+	if (!bForcedAnyTowelSystem && CachedTowelSystem)
 	{
-		ResultElapsed += RealDelta;
-		if (ResultElapsed >= ResultDisplayTime)
-		{
-			ResultElapsed    = 0.f;
-			bIsShowingResult = false;
-
-			UGameplayStatics::SetGlobalTimeDilation(GetWorld(), 1.0f);
-			if (ATomatinaHUD* HUD = GetTomatinaHUD())
-			{
-				HUD->HideResult();
-			}
-
-			if (bLastPhotoSucceeded)
-			{
-				// 成功 → 次ミッションへ
-				StartMission(CurrentMissionIndex + 1);
-			}
-			// 失敗時は同ミッション継続（ターゲットは生きたまま、残り時間も継続）
-		}
-		return;
+		CachedTowelSystem->ForceTowelToCenterAfterCountdown();
 	}
 
-	// ── ミッション結果（時間切れ）表示中 ─────────────────
-	if (bIsShowingMissionResult)
+	if (ATomatinaHUD* HUD = GetTomatinaHUD())
 	{
-		MissionResultElapsed += RealDelta;
-		if (MissionResultElapsed >= MissionResultDisplayTime)
-		{
-			MissionResultElapsed    = 0.f;
-			bIsShowingMissionResult = false;
-
-			if (ATomatinaHUD* HUD = GetTomatinaHUD())
-			{
-				HUD->HideMissionResult();
-			}
-
-			StartMission(CurrentMissionIndex + 1);
-		}
-		return;
-	}
-
-	// ── 最終リザルト前の溜め（BGM のみ残して静止中） ─────
-	if (bIsBuildingUpFinalResult)
-	{
-		FinalBuildupElapsed += RealDelta;
-		if (FinalBuildupElapsed >= FinalResultBuildupTime)
-		{
-			FinalBuildupElapsed       = 0.f;
-			bIsBuildingUpFinalResult  = false;
-			ShowFinalResult();
-		}
-		return;
-	}
-
-	// ── ミッション残り時間 ──────────────────────────────
-	UpdateStylishGauge(RealDelta);
-
-	if (RemainingTime > 0.f)
-	{
-		RemainingTime -= DeltaSeconds; // 通常再生中なので DeltaSeconds で OK
-
-		if (ATomatinaHUD* HUD = GetTomatinaHUD())
-		{
-			HUD->UpdateTimer(FMath::Max(0.f, RemainingTime));
-		}
-
-		if (RemainingTime <= 0.f)
-		{
-			RemainingTime = -1.f;
-
-			UE_LOG(LogTemp, Warning, TEXT("ATomatinaGameMode: 時間切れ Mission=%d"),
-				CurrentMissionIndex);
-
-			if (ATomatinaHUD* HUD = GetTomatinaHUD())
-			{
-				HUD->ShowMissionResult(0, TEXT("時間切れ！"));
-			}
-
-			// 時間切れ SE
-			UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, TimeUpSound);
-
-			bIsShowingMissionResult = true;
-			MissionResultElapsed    = 0.f;
-		}
+		HUD->UpdateTowelPosition(CenterPosition);
+		HUD->ShowTowel();
 	}
 }
 
-// =============================================================================
-// StartMission
-// =============================================================================
+bool ATomatinaGameMode::TickGameTime(float DeltaSeconds)
+{
+	if (bIsShowingResult || bIsShowingMissionResult || bIsBuildingUpFinalResult || GameTimeRemaining <= 0.f)
+	{
+		return false;
+	}
+
+	GameTimeRemaining -= DeltaSeconds;
+	if (GameTimeRemaining < 0.f) { GameTimeRemaining = 0.f; }
+
+	if (ATomatinaHUD* HUD = GetTomatinaHUD())
+	{
+		HUD->UpdateGameTimer(GameTimeRemaining, GameTimeTotal);
+	}
+
+	if (GameTimeRemaining > 0.f)
+	{
+		return false;
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("ATomatinaGameMode: ゲーム全体の制限時間に到達 → 最終リザルトへ"));
+	BeginFinalResultBuildup();
+	return true;
+}
+
+bool ATomatinaGameMode::TickPhotoResult(float RealDelta)
+{
+	if (!bIsShowingResult)
+	{
+		return false;
+	}
+
+	ResultElapsed += RealDelta;
+	if (ResultElapsed >= ResultDisplayTime)
+	{
+		ResultElapsed    = 0.f;
+		bIsShowingResult = false;
+
+		UGameplayStatics::SetGlobalTimeDilation(GetWorld(), 1.0f);
+		if (ATomatinaHUD* HUD = GetTomatinaHUD())
+		{
+			HUD->HideResult();
+		}
+
+		if (bLastPhotoSucceeded)
+		{
+			StartMission(CurrentMissionIndex + 1);
+		}
+	}
+
+	return true;
+}
+
+bool ATomatinaGameMode::TickMissionResult(float RealDelta)
+{
+	if (!bIsShowingMissionResult)
+	{
+		return false;
+	}
+
+	MissionResultElapsed += RealDelta;
+	if (MissionResultElapsed >= MissionResultDisplayTime)
+	{
+		MissionResultElapsed    = 0.f;
+		bIsShowingMissionResult = false;
+
+		if (ATomatinaHUD* HUD = GetTomatinaHUD())
+		{
+			HUD->HideMissionResult();
+		}
+
+		StartMission(CurrentMissionIndex + 1);
+	}
+
+	return true;
+}
+
+bool ATomatinaGameMode::TickFinalResultBuildup(float RealDelta)
+{
+	if (!bIsBuildingUpFinalResult)
+	{
+		return false;
+	}
+
+	FinalBuildupElapsed += RealDelta;
+	if (FinalBuildupElapsed >= FinalResultBuildupTime)
+	{
+		FinalBuildupElapsed       = 0.f;
+		bIsBuildingUpFinalResult  = false;
+		ShowFinalResult();
+	}
+
+	return true;
+}
+
+void ATomatinaGameMode::TickMissionTimer(float DeltaSeconds)
+{
+	if (RemainingTime <= 0.f)
+	{
+		return;
+	}
+
+	RemainingTime -= DeltaSeconds;
+
+	if (ATomatinaHUD* HUD = GetTomatinaHUD())
+	{
+		HUD->UpdateTimer(FMath::Max(0.f, RemainingTime));
+	}
+
+	if (RemainingTime > 0.f)
+	{
+		return;
+	}
+
+	RemainingTime = -1.f;
+	UE_LOG(LogTemp, Warning, TEXT("ATomatinaGameMode: 時間切れ Mission=%d"), CurrentMissionIndex);
+
+	if (ATomatinaHUD* HUD = GetTomatinaHUD())
+	{
+		HUD->ShowMissionResult(0, TEXT("時間切れ！"));
+	}
+
+	UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, TimeUpSound);
+
+	bIsShowingMissionResult = true;
+	MissionResultElapsed    = 0.f;
+}
+
 void ATomatinaGameMode::StartMission(int32 Index)
 {
 	UE_LOG(LogTemp, Warning, TEXT("ATomatinaGameMode::StartMission Index=%d"), Index);
@@ -375,13 +419,9 @@ void ATomatinaGameMode::StartMission(int32 Index)
 
 	RemainingTime = (Mission.TimeLimit > 0.f) ? Mission.TimeLimit : -1.f;
 
-	// ミッション開始 SE
 	UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, MissionStartSound);
 }
 
-// =============================================================================
-// TakePhoto — 左クリック（ズーム中）で PlayerPawn から呼ばれる
-// =============================================================================
 void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 {
 	UE_LOG(LogTemp, Warning, TEXT("ATomatinaGameMode::TakePhoto 開始"));
@@ -393,10 +433,8 @@ void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 	}
 	if (!ZoomCamera || !GetWorld()) { return; }
 
-	// ① ズーム映像 → RT_Photo
 	UTomatinaFunctionLibrary::CopyZoomToPhoto(ZoomCamera, RT_Photo);
 
-	// ② スコア計算
 	static const TArray<ATomatinaTargetBase*> EmptyTargets;
 	const TArray<ATomatinaTargetBase*>& Targets =
 		TargetSpawner ? TargetSpawner->ActiveTargets : EmptyTargets;
@@ -407,7 +445,6 @@ void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 	int32 Score     = Result.Score;
 	FString Comment = Result.Comment;
 
-	// ③ タオル映り込み減点
 	if (AActor* TowelActor = UGameplayStatics::GetActorOfClass(
 			GetWorld(), ATomatinaTowelSystem::StaticClass()))
 	{
@@ -422,7 +459,7 @@ void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 		}
 	}
 
-	// ③' 写真に写り込んだ汚れの個数分を減点（写真 = 撮影時の汚れ分布そのもの）
+	// 写真 = 撮影時の汚れ分布なので、写り込んだ汚れの個数で減点する。
 	TArray<FDirtSplat> ActiveDirts;
 	if (AActor* DirtActor = UGameplayStatics::GetActorOfClass(
 			GetWorld(), ATomatoDirtManager::StaticClass()))
@@ -444,7 +481,7 @@ void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 		}
 	}
 
-	// ③'' 高ランク時の被写体ボーナス（隠し要素）
+	// 高ランク時だけ被写体側の隠しボーナスを許可する。
 	const bool bWasHighRank = (static_cast<uint8>(StylishRank) >= static_cast<uint8>(HiddenActionMinRank));
 	if (Score > 0 && Result.BestTarget && bWasHighRank && Result.BestTarget->HighRankBonusScore != 0)
 	{
@@ -453,7 +490,6 @@ void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 		Comment += FString::Printf(TEXT(" 高ランク被写体ボーナス %+d"), Score - Before);
 	}
 
-	// ③''' スタイリッシュゲージ更新（高得点をテンポ良く重ねるとランクアップ）
 	AddStylishGaugeFromShot(Score);
 
 	const bool bIsHighRankNow = (static_cast<uint8>(StylishRank) >= static_cast<uint8>(HiddenActionMinRank));
@@ -469,7 +505,6 @@ void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 	UE_LOG(LogTemp, Warning, TEXT("TakePhoto: Score=%d Total=%d Dirts=%d"),
 		Score, TotalScore, ActiveDirts.Num());
 
-	// ── リザルト統計サンプリング ─────────────────────────────────
 	// 撮影時点のスタイリッシュランクを平均集計、2P 直近活動があったかで同期集計。
 	{
 		StylishRankSum += static_cast<float>(StylishRank);
@@ -485,31 +520,26 @@ void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 		}
 	}
 
-	// 成功/失敗フラグ（Tick 側の分岐で使う。失敗時は次ミッションへ進めない）
+	// 失敗時は同じミッションを続ける。
 	bLastPhotoSucceeded = (Score > 0);
 
-	// ④ 撮影成功なら BestTarget を Spawner から除去
 	if (bLastPhotoSucceeded && TargetSpawner && Result.BestTarget)
 	{
 		TargetSpawner->RemoveTarget(Result.BestTarget);
 	}
 
-	// ⑤ シャッター音
 	if (ShutterSound)
 	{
 		UGameplayStatics::PlaySound2D(this, ShutterSound);
 	}
 
-	// ⑤' ファンファーレ（今回の撮影スコアに応じて音を変える）
 	PlayFanfareForShotScore(Score);
 
-	// ⑥ ミッションタイマー：成功時のみ停止。失敗時は継続（同ミッションを続ける）
 	if (bLastPhotoSucceeded)
 	{
 		RemainingTime = -1.f;
 	}
 
-	// ⑦ 世界停止 → HUD にフラッシュ・結果表示
 	UGameplayStatics::SetGlobalTimeDilation(GetWorld(), 0.0f);
 	bIsShowingResult = true;
 	ResultElapsed    = 0.f;
@@ -523,10 +553,6 @@ void ATomatinaGameMode::TakePhoto(USceneCaptureComponent2D* ZoomCamera)
 	PushStylishStateToHUD();
 }
 
-// =============================================================================
-// BeginFinalResultBuildup — 全ミッション終了後、リザルト表示前の「溜め」
-// BGM 以外の音停止、汚れ全削除、ミッション UI を隠して FinalResultBuildupTime 秒待つ
-// =============================================================================
 void ATomatinaGameMode::BeginFinalResultBuildup()
 {
 	UE_LOG(LogTemp, Warning, TEXT("ATomatinaGameMode::BeginFinalResultBuildup (%.2fs)"),
@@ -535,31 +561,26 @@ void ATomatinaGameMode::BeginFinalResultBuildup()
 	bIsBuildingUpFinalResult = true;
 	FinalBuildupElapsed      = 0.f;
 
-	// 世界停止（BGM・HUD Tick は実時間で動く）
+	// BGM・HUD Tick は実時間で動く。
 	if (GetWorld())
 	{
 		UGameplayStatics::SetGlobalTimeDilation(GetWorld(), 0.0f);
 	}
 
-	// BGM 以外のすべての音を停止
 	StopAllSoundsExceptBGM();
 
-	// 溜め開始の合図 SE（BGM のみ残った静寂に対して効果的）
 	UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, FinalBuildupSound);
 
-	// 汚れ全削除
 	if (ATomatoDirtManager* DirtMgr = GetDirtManager())
 	{
 		DirtMgr->ClearAllDirts();
 	}
 
-	// ミッション UI を隠す（タイマー・スコアが残らないように）
 	if (ATomatinaHUD* HUD = GetTomatinaHUD())
 	{
 		HUD->HideMissionDisplay();
 	}
 
-	// 溜め時間が 0 以下なら即座にリザルト表示
 	if (FinalResultBuildupTime <= 0.f)
 	{
 		bIsBuildingUpFinalResult = false;
@@ -567,10 +588,6 @@ void ATomatinaGameMode::BeginFinalResultBuildup()
 	}
 }
 
-// =============================================================================
-// PlayFanfareForShotScore — 撮影スコアに応じたファンファーレを再生
-// FanfareTiers から MinScore <= ShotScore を満たすものの中で最大 MinScore を採用
-// =============================================================================
 void ATomatinaGameMode::PlayFanfareForShotScore(int32 ShotScore)
 {
 	if (FanfareTiers.Num() == 0) { return; }
@@ -597,10 +614,6 @@ void ATomatinaGameMode::PlayFanfareForShotScore(int32 ShotScore)
 		Chosen->VolumeMultiplier, Chosen->PitchMultiplier);
 }
 
-// =============================================================================
-// StopAllSoundsExceptBGM
-// BGMAudioComp を除く全 UAudioComponent を停止する
-// =============================================================================
 void ATomatinaGameMode::StopAllSoundsExceptBGM()
 {
 	UWorld* World = GetWorld();
@@ -624,9 +637,6 @@ void ATomatinaGameMode::StopAllSoundsExceptBGM()
 		StoppedCount);
 }
 
-// =============================================================================
-// ShowFinalResult — 全ミッション終了
-// =============================================================================
 void ATomatinaGameMode::ShowFinalResult()
 {
 	// 平均スタイリッシュランクを集計値から決定 (float 平均を enum にスナップ)
@@ -653,13 +663,9 @@ void ATomatinaGameMode::ShowFinalResult()
 		HUD->ShowFinalResult(TotalScore, Missions.Num(), AvgRankStr, SyncRate);
 	}
 
-	// リザルト表示の瞬間の SE（発表ファンファーレ等）
 	UTomatinaFunctionLibrary::PlayTomatinaCue2D(this, FinalResultRevealSound);
 }
 
-// =============================================================================
-// ShuffleMissions — Fisher-Yates + 同タイプ連続回避
-// =============================================================================
 void ATomatinaGameMode::ShuffleMissions()
 {
 	const int32 Num = Missions.Num();
@@ -687,9 +693,6 @@ void ATomatinaGameMode::ShuffleMissions()
 	UE_LOG(LogTemp, Warning, TEXT("ShuffleMissions: %d ミッションをシャッフル"), Num);
 }
 
-// =============================================================================
-// GetTomatinaHUD — ヘルパー
-// =============================================================================
 ATomatinaHUD* ATomatinaGameMode::GetTomatinaHUD() const
 {
 	if (UWorld* World = GetWorld())
@@ -702,9 +705,6 @@ ATomatinaHUD* ATomatinaGameMode::GetTomatinaHUD() const
 	return nullptr;
 }
 
-// =============================================================================
-// CachePlayerPawnSizes — PlayerPawn から 4 サイズを取得
-// =============================================================================
 void ATomatinaGameMode::CachePlayerPawnSizes()
 {
 	if (UWorld* World = GetWorld())
@@ -725,9 +725,6 @@ void ATomatinaGameMode::CachePlayerPawnSizes()
 	}
 }
 
-// =============================================================================
-// GetDirtManager
-// =============================================================================
 ATomatoDirtManager* ATomatinaGameMode::GetDirtManager()
 {
 	if (CachedDirtManager && IsValid(CachedDirtManager))
@@ -748,10 +745,6 @@ ATomatoDirtManager* ATomatinaGameMode::GetDirtManager()
 	return CachedDirtManager;
 }
 
-// =============================================================================
-// CalculateDirtCoverage01
-// 汚れ占有率を 0〜1 で近似。高値なら「画面が塞がれている」扱い。
-// =============================================================================
 float ATomatinaGameMode::CalculateDirtCoverage01()
 {
 	ATomatoDirtManager* DirtMgr = GetDirtManager();
@@ -807,9 +800,6 @@ float ATomatinaGameMode::CalculateDirtCoverage01()
 	return static_cast<float>(Filled) / static_cast<float>(GridX * GridY);
 }
 
-// =============================================================================
-// UpdateStylishGauge
-// =============================================================================
 void ATomatinaGameMode::UpdateStylishGauge(float RealDelta)
 {
 	if (RealDelta <= 0.f)
@@ -839,9 +829,6 @@ void ATomatinaGameMode::UpdateStylishGauge(float RealDelta)
 	PushStylishStateToHUD();
 }
 
-// =============================================================================
-// AddStylishGaugeFromShot
-// =============================================================================
 void ATomatinaGameMode::AddStylishGaugeFromShot(int32 ShotScore)
 {
 	if (ShotScore <= 0)
@@ -884,9 +871,6 @@ void ATomatinaGameMode::AddStylishGaugeFromShot(int32 ShotScore)
 	PushStylishStateToHUD();
 }
 
-// =============================================================================
-// ApplyStylishRankFromGauge
-// =============================================================================
 void ATomatinaGameMode::ApplyStylishRankFromGauge()
 {
 	const EStylishRank OldRank = StylishRank;
@@ -922,9 +906,6 @@ void ATomatinaGameMode::ApplyStylishRankFromGauge()
 	}
 }
 
-// =============================================================================
-// GetStylishRankName
-// =============================================================================
 FName ATomatinaGameMode::GetStylishRankName(EStylishRank Rank) const
 {
 	switch (Rank)
@@ -939,9 +920,6 @@ FName ATomatinaGameMode::GetStylishRankName(EStylishRank Rank) const
 	}
 }
 
-// =============================================================================
-// PushStylishStateToHUD
-// =============================================================================
 void ATomatinaGameMode::PushStylishStateToHUD()
 {
 	if (ATomatinaHUD* HUD = GetTomatinaHUD())
@@ -952,4 +930,34 @@ void ATomatinaGameMode::PushStylishStateToHUD()
 		const bool bDanger = (DirtCoverage01 >= StylishDirtDangerThreshold);
 		HUD->UpdateStylishDisplay(GetStylishRankName(StylishRank).ToString(), GaugePercent, StylishComboCount, bDanger);
 	}
+}
+
+void ATomatinaGameMode::EnsureTowelSystemExists()
+{
+	if (!bEnsureTowelSystemExists || !GetWorld())
+	{
+		return;
+	}
+
+	if (AActor* Existing = UGameplayStatics::GetActorOfClass(GetWorld(), ATomatinaTowelSystem::StaticClass()))
+	{
+		CachedTowelSystem = Cast<ATomatinaTowelSystem>(Existing);
+		return;
+	}
+
+	TSubclassOf<ATomatinaTowelSystem> ClassToSpawn = TowelSystemClass;
+	if (!ClassToSpawn)
+	{
+		ClassToSpawn = ATomatinaTowelSystem::StaticClass();
+	}
+	if (!ClassToSpawn)
+	{
+		return;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Name = TEXT("TomatinaTowelSystem_Auto");
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	CachedTowelSystem = GetWorld()->SpawnActor<ATomatinaTowelSystem>(
+		ClassToSpawn, FTransform::Identity, SpawnParams);
 }

@@ -4,21 +4,44 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "TomatinaSoundCue.h"  // FTomatinaSoundCue
+#include "TomatinaSoundCue.h"
 #include "TomatinaTowelSystem.generated.h"
 
 class ATomatoDirtManager;
+class ATomatinaHUD;
 class ATomatinaPlayerPawn;
 class USoundBase;
 class UAudioComponent;
+class ULeapComponent;
 
-/**
- * タオルの表示・拭き取り・耐久値を管理する。
- *
- * 手のデータは Blueprint から UpdateHandData() で渡す方式。
- * BP 派生クラス側で Ultraleap の OnLeapHandMoved 等を受けて
- * UpdateHandData(bDetected, ScreenPosition, Speed) を呼ぶこと。
- */
+UENUM(BlueprintType)
+enum class EHandSmoothingMode : uint8
+{
+	None    UMETA(DisplayName="None"),
+	EMA     UMETA(DisplayName="EMA"),
+	OneEuro UMETA(DisplayName="One Euro"),
+};
+
+UENUM(BlueprintType)
+enum class ELeapTowelHandSelection : uint8
+{
+	Any   UMETA(DisplayName="Any"),
+	Left  UMETA(DisplayName="Left"),
+	Right UMETA(DisplayName="Right"),
+};
+
+UENUM(BlueprintType)
+enum class ELeapTowelAxis : uint8
+{
+	X         UMETA(DisplayName="X"),
+	Y         UMETA(DisplayName="Y"),
+	Z         UMETA(DisplayName="Z"),
+	NegativeX UMETA(DisplayName="-X"),
+	NegativeY UMETA(DisplayName="-Y"),
+	NegativeZ UMETA(DisplayName="-Z"),
+};
+
+// Leap入力、タオル表示、拭き取り判定をまとめるActor。
 UCLASS(Blueprintable)
 class TOMATO_API ATomatinaTowelSystem : public AActor
 {
@@ -30,140 +53,290 @@ public:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 
-	// =========================================================================
-	// 手の状態（BP から UpdateHandData で更新）
-	// =========================================================================
+	// Details調整だけでLeap入力を使えるようにする。
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|C++ Input")
+	ULeapComponent* LeapComponent = nullptr;
 
-	/** LeapMotion の視野に手があるか */
-	UPROPERTY(BlueprintReadOnly, Category="LeapMotion")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
 	bool bHandDetected = false;
 
-	/**
-	 * 手の位置を 0〜1 の正規化座標に変換したもの。
-	 * BP 側で Ultraleap の Hand 座標を変換して渡すこと。
-	 */
-	UPROPERTY(BlueprintReadOnly, Category="LeapMotion")
+	// 既存BP参照のため名前は維持。中身はスムージング/Clamp後の座標。
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
 	FVector2D HandScreenPosition = FVector2D(0.5f, 0.5f);
 
-	/**
-	 * 手の移動速度。BP 側でフレーム間差分から計算して渡すこと。
-	 * 拭き取り効率に直結する。
-	 */
-	UPROPERTY(BlueprintReadOnly, Category="LeapMotion")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	FVector2D RawHandScreenPosition = FVector2D(0.5f, 0.5f);
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	FVector2D SmoothedHandScreenPosition = FVector2D(0.5f, 0.5f);
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	FVector2D ClampedHandScreenPosition = FVector2D(0.5f, 0.5f);
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
 	float HandSpeed = 0.0f;
 
-	// =========================================================================
-	// 手データ更新（BP から毎フレーム呼ぶ）
-	// =========================================================================
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	float ProcessedHandSpeed = 0.0f;
 
-	/**
-	 * BP 派生クラスから毎フレーム呼んで手のデータを渡す。
-	 * Ultraleap の OnLeapTrackingData 等でデータを受け取り
-	 * ここに流し込むことで C++ 側が SDK に依存しない構造になる。
-	 *
-	 * @param bDetected      手が検出されているか
-	 * @param ScreenPosition 手の位置（正規化座標 0〜1）
-	 * @param Speed          手の移動速度（正規化座標/秒）
-	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	bool bHasValidInput = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	bool bUsingGraceInput = false;
+
+	// BP互換入口。bReadLeapInputInCpp=trueならTick冒頭のC++入力で上書きする。
 	UFUNCTION(BlueprintCallable, Category="Towel")
 	void UpdateHandData(bool bDetected, FVector2D ScreenPosition, float Speed);
 
-	// =========================================================================
-	// タオル設定
-	// =========================================================================
+	// カウントダウン中に拾った入力やWidget初期値を捨て、開始直後は中央に戻す。
+	void ForceTowelToCenterAfterCountdown(float HoldSeconds = 1.5f);
 
-	/** タオルの最大耐久値 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|C++ Input")
+	bool bReadLeapInputInCpp = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|C++ Input")
+	ELeapTowelHandSelection LeapHandSelection = ELeapTowelHandSelection::Any;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|C++ Input")
+	bool bUseStabilizedPalmPosition = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|C++ Input")
+	bool bApplyLeapDeviceOrigin = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|C++ Input")
+	bool bUseUltraleapPluginFallback = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|C++ Input")
+	FString LeapDeviceSerial;
+
+	// センサーの置き方で軸が変わるのでDetailsで調整する。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Mapping")
+	ELeapTowelAxis LeapHorizontalAxis = ELeapTowelAxis::Y;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Mapping")
+	ELeapTowelAxis LeapVerticalAxis = ELeapTowelAxis::Z;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Mapping")
+	FVector2D LeapInputCenter = FVector2D(0.0f, 25.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Mapping", meta=(ClampMin="1.0"))
+	FVector2D LeapInputHalfRange = FVector2D(35.0f, 25.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Mapping", meta=(ClampMin="0.0", ClampMax="1000.0"))
+	float LeapInputSpeedScale = 100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Gating", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float MinConfidence = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Gating", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float MinVisibleTime = 0.05f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Gating", meta=(ClampMin="0.0"))
+	float HighSpeedThreshold = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Gating", meta=(ClampMin="0.1", ClampMax="1.0"))
+	float SpeedConfidenceRelaxFactor = 0.7f;
+
+	// 手を近づけすぎた時の警告。実機を見ながら軸としきい値を合わせる。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Too Close Warning")
+	bool bEnableLeapTooCloseWarning = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Too Close Warning")
+	ELeapTowelAxis LeapTooCloseAxis = ELeapTowelAxis::Z;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Too Close Warning")
+	float LeapTooCloseThreshold = -5.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Too Close Warning")
+	float LeapTooCloseClearThreshold = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|TooClose")
+	float CloseEnterThresholdMm = 100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|TooClose")
+	float CloseExitThresholdMm = 130.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|TooClose", meta=(ClampMin="0.0"))
+	float CloseEnterDelay = 0.15f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|TooClose", meta=(ClampMin="0.0"))
+	float CloseExitDelay = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|TooClose", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float HeightEMAAlpha = 0.3f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	float LastLeapDistanceValue = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	float SmoothedPalmHeight = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	bool bLeapTooCloseToDevice = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Stability")
+	bool bDebugLeapInput = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	FString LastLeapInputStatus = TEXT("Not started");
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	bool bLeapComponentHasDevice = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	int32 LastLeapFrameHandCount = 0;
+
+	// FrameId/TimeStampが止まるならLeap側の更新が止まっている。
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	int32 LastLeapFrameId = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	int64 LastLeapFrameTimeStamp = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	bool bLastLeapLeftVisible = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	bool bLastLeapRightVisible = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	FVector LastSelectedLeapPalmRawPosition = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	FVector LastSelectedLeapPalmStabilizedPosition = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="LeapMotion|Debug")
+	FVector LastSelectedLeapPalmPosition = FVector::ZeroVector;
+
+	// 一瞬のロストだけ拾う。長く外れたら拭き取り停止。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Stability", meta=(ClampMin="0.0", ClampMax="0.5"))
+	float InputGraceTime = 0.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Grace", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float SpeedDecayStartRatio = 0.6f;
+
+	// スムージングは拭き取り中心用。速度判定はRaw由来を使う。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Smoothing")
+	EHandSmoothingMode SmoothingMode = EHandSmoothingMode::EMA;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Smoothing", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float EMAAlpha = 0.45f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Smoothing", meta=(ClampMin="0.001", ClampMax="30.0"))
+	float OneEuroMinCutoff = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Smoothing", meta=(ClampMin="0.0", ClampMax="10.0"))
+	float OneEuroBeta = 0.02f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Smoothing", meta=(ClampMin="0.001", ClampMax="30.0"))
+	float OneEuroDCutoff = 1.0f;
+
+	// 画面端で中心が張り付いても端まで拭けるようにする。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wipe|Edge", meta=(ClampMin="0.0", ClampMax="0.5"))
+	float EdgeThreshold = 0.06f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wipe|Edge", meta=(ClampMin="0.0", ClampMax="0.5"))
+	float EdgeRadiusBoost = 0.03f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wipe|Edge", meta=(ClampMin="1.0", ClampMax="3.0"))
+	float MaxEdgeRadiusMultiplier = 1.35f;
+
 	UPROPERTY(EditAnywhere, Category="Towel")
 	float MaxDurability = 100.0f;
 
-	/** 現在の耐久値 */
 	UPROPERTY(BlueprintReadOnly, Category="Towel")
 	float CurrentDurability = 100.0f;
 
-	/** 拭いている間に 1 秒あたり消費する耐久値 */
 	UPROPERTY(EditAnywhere, Category="Towel")
 	float DurabilityDrainRate = 10.0f;
 
-	/** タオル交換にかかる秒数 */
 	UPROPERTY(EditAnywhere, Category="Towel")
 	float SwapDuration = 3.0f;
 
-	/** タオル交換中フラグ */
 	UPROPERTY(BlueprintReadOnly, Category="Towel")
 	bool bIsSwapping = false;
 
-	/** 交換アニメーションの残り秒数 */
 	UPROPERTY(BlueprintReadOnly, Category="Towel")
 	float SwapTimer = 0.0f;
 
-	/** タオルが画面に表示されているか（手が検出されているか） */
 	UPROPERTY(BlueprintReadOnly, Category="Towel")
 	bool bTowelVisible = false;
 
-	// =========================================================================
-	// 拭き取り設定
-	// =========================================================================
-
-	/** 正規化座標での拭き取り範囲（0.1 = 画面の 10%） */
 	UPROPERTY(EditAnywhere, Category="Wipe")
 	float WipeRadius = 0.1f;
 
-	/** 基本拭き取り効率（HandSpeed で乗算される） */
 	UPROPERTY(EditAnywhere, Category="Wipe")
 	float WipeEfficiency = 1.0f;
 
-	/** この速度未満では拭き取りが発生しない */
 	UPROPERTY(EditAnywhere, Category="Wipe")
 	float MinSpeedToWipe = 50.0f;
 
-	/** HandSpeed にかける係数（速く振るほど効率 UP） */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LeapMotion|Wiping", meta=(ClampMin="0.1", ClampMax="1.0"))
+	float WipeContinueSpeedFactor = 0.5f;
+
 	UPROPERTY(EditAnywhere, Category="Wipe")
 	float SpeedMultiplier = 0.01f;
 
-	// =========================================================================
-	// 拭く音（ループ SE）
-	// =========================================================================
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wiping|LineSegment", meta=(ClampMin="0.1", ClampMax="2.0"))
+	float SampleSpacingFactor = 0.5f;
 
-	/** 拭いている間ループ再生する SE（ループ設定の SoundWave/SoundCue を推奨） */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wiping|LineSegment", meta=(ClampMin="1", ClampMax="32"))
+	int32 MaxWipeSamples = 8;
+
+	// 自動検索が外す場合はレベル上のDirtManagerを直接指定する。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wipe|References")
+	ATomatoDirtManager* DirtManagerOverride = nullptr;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	bool bWipeAttemptedThisFrame = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	bool bWipeHadDirtManagerThisFrame = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	FVector2D LastWipePosition = FVector2D(0.5f, 0.5f);
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	float LastAdjustedWipeRadius = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	float LastWipeAmount = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	float LastWipeSegmentLength = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	int32 LastWipeSampleCount = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	float LastWipeAmountPerSample = 0.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Wipe|Debug")
+	bool bLastGraceJustExited = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wipe|Audio")
 	USoundBase* WipeLoopSound = nullptr;
 
-	/** 拭く音のボリューム倍率 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wipe|Audio", meta=(ClampMin="0.0", ClampMax="4.0"))
 	float WipeLoopVolume = 1.0f;
 
-	/** 拭く音のピッチ倍率 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wipe|Audio", meta=(ClampMin="0.1", ClampMax="4.0"))
 	float WipeLoopPitch = 1.0f;
 
-	/** タオル耐久が 0 になった瞬間の SE */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Towel|Audio")
 	FTomatinaSoundCue TowelBreakSound;
 
-	/** タオル交換完了（新しいタオルが使える）瞬間の SE */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Towel|Audio")
 	FTomatinaSoundCue TowelReadySound;
 
-	// =========================================================================
-	// 撮影判定
-	// =========================================================================
-
-	/** タオルがズーム映像に映っているか（true なら減点対象） */
 	UPROPERTY(BlueprintReadOnly, Category="Towel")
 	bool bTowelInZoomView = false;
 
-	/** タオルが映り込んだときの減点（負の値） */
 	UPROPERTY(EditAnywhere, Category="Towel")
 	int32 TowelPenalty = -20;
 
-	// =========================================================================
-	// 公開関数
-	// =========================================================================
-
-	/**
-	 * タオルの正規化座標がズーム視界内に入っているか判定する。
-	 * TakePhoto 直前に GameMode から呼ばれる（bTowelInZoomView も更新）。
-	 */
+	// TakePhoto直前にGameModeから呼ばれる。
 	UFUNCTION(BlueprintCallable, Category="Towel")
 	bool CheckTowelInView(FVector2D TowelNormPos);
 
@@ -177,12 +350,70 @@ private:
 	UPROPERTY()
 	ATomatinaPlayerPawn* CachedPlayerPawn;
 
-	/** 拭き SE の AudioComponent（ループ再生中に保持） */
 	UPROPERTY()
 	UAudioComponent* WipeAudioComp = nullptr;
 
-	/** Tick 間の拭き状態を保持（エッジ検出用） */
 	bool bWasWiping = false;
+	bool bTowelShownOnHUD = false;
 
+	bool bHasEverValidInput = false;
+	bool bHasSmoothedHandPosition = false;
+	bool bHasLastCppLeapScreenPosition = false;
+	bool bHasLoggedBlueprintInputState = false;
+	bool bLastLoggedBlueprintInputDetected = false;
+	bool bLastCppLeapHadSelectedHand = false;
+	bool bHasSmoothedPalmHeight = false;
+	bool bLastLeapInputGated = false;
+	bool bHasPrevWipePosition = false;
+	bool bWasUsingGraceInput = false;
+	bool bWarnedMissingDirtManager = false;
+	bool bWarnedMissingPlayerPawn = false;
+	bool bPendingStartupCenterCalibration = false;
+	bool bHasStartupScreenOffset = false;
+	float ForceCenterRemainingTime = 0.0f;
+	float LastValidInputTime = -1000.0f;
+	float LastValidHandSpeed = 0.0f;
+	float CloseEnterTimer = 0.0f;
+	float CloseExitTimer = 0.0f;
+	float LastLeapConfidence = 0.0f;
+	float LastLeapVisibleTime = 0.0f;
+	float LastRawLeapHandSpeed = 0.0f;
+	int32 LastLeapHandId = 0;
+	FVector2D PrevClampedHandScreenPosition = FVector2D(0.5f, 0.5f);
+	FVector2D LastValidRawHandScreenPosition = FVector2D(0.5f, 0.5f);
+	FVector2D LastValidSmoothedHandScreenPosition = FVector2D(0.5f, 0.5f);
+	FVector2D LastValidClampedHandScreenPosition = FVector2D(0.5f, 0.5f);
+	FVector2D LastCppLeapScreenPosition = FVector2D(0.5f, 0.5f);
+	FVector2D StartupScreenOffset = FVector2D::ZeroVector;
+
+	struct FOneEuroAxisState
+	{
+		bool bInitialized = false;
+		float PreviousRaw = 0.0f;
+		float PreviousFiltered = 0.0f;
+		float PreviousDerivative = 0.0f;
+	};
+
+	FOneEuroAxisState OneEuroX;
+	FOneEuroAxisState OneEuroY;
+
+	FVector2D ClampNormalizedHandPosition(FVector2D Position) const;
+	void PollLeapInputFromCpp(float DeltaTime);
+	void SetLeapInputStatus(const FString& NewStatus);
+	bool TryGetSelectedLeapHand(const struct FLeapFrameData& Frame, struct FLeapHandData& OutHand) const;
+	FVector2D ConvertLeapPositionToScreen(FVector LeapPosition) const;
+	float ReadLeapAxis(FVector LeapPosition, ELeapTowelAxis Axis) const;
+	void UpdateLeapTooCloseState(FVector LeapPosition, bool bHasSelectedHand, float DeltaTime);
+	void ResetHandInputStateToCenter();
+	float GetDurabilityPercent() const;
+	void UpdateTowelHUDStatus(ATomatinaHUD* HUD) const;
+	void HideTowelVisual(ATomatinaHUD* HUD);
+	bool TickTowelSwap(float DeltaTime, ATomatinaHUD* HUD);
+	FVector2D ApplyHandSmoothing(FVector2D RawPosition, float DeltaTime);
+	float ApplyOneEuroAxis(float Value, float DeltaTime, FOneEuroAxisState& AxisState) const;
+	float CalculateOneEuroAlpha(float Cutoff, float DeltaTime) const;
+	float CalculateEdgeAdjustedWipeRadius(FVector2D ClampedPosition) const;
+	void ResetHandInputFilter();
+	void LogLeapInputFrame(bool bIsWiping) const;
 	void UpdateWipeSound(bool bIsWiping);
 };
