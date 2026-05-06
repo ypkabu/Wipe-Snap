@@ -15,9 +15,8 @@
 
 ## デモ
 
-- プレイ動画: URL
+- プレイ動画:https://youtu.be/YlQxtFcei3Y
 - Zenn: URL
-- 写真 / GIF: 追加予定
 
 ## 自分の担当
 
