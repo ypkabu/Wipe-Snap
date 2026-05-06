@@ -16,7 +16,7 @@
 ## デモ
 
 - プレイ動画:https://youtu.be/YlQxtFcei3Y
-- Zenn: URL
+- Zenn: URL:https://zenn.dev/ippon/articles/32ad6608d7eb30
 
 ## 自分の担当
 
